@@ -1,6 +1,6 @@
 # Layer Harvester
 
-Fetches WMS capabilities from live environments, extracts layers tagged with the `hazardlookup` keyword, and writes an Excel workbook per environment group.
+Log in to WMS environments, fetch GetCapabilities, extract layers tagged with the `hazardlookup` keyword, and export results to an Excel workbook per environment group.
 
 ## Table of contents
 
@@ -14,6 +14,7 @@ Fetches WMS capabilities from live environments, extracts layers tagged with the
   - [Multiple env files](#multiple-env-files)
   - [Combine flags](#combine-flags)
 - [Credential files](#credential-files-groupenvironmentenv)
+- [Environment variables](#environment-variables)
 - [Flow](#flow)
 - [Fetch modes](#fetch-modes)
   - [Auto-scan (default)](#auto-scan-default)
@@ -89,17 +90,58 @@ PASSWORD=your_password
 BASE_URL=https://dev.example.com
 LOGIN_URL=https://dev.example.com/graph/api/v1/login
 GET_CAPABILITIES_URL=https://dev.example.com/graph/geoserver/wms?service=wms&version=1.3.0&request=GetCapabilities
+
+# Optional — see Environment variables below
+SSL_VERIFY=false
+FULL_LAYER_DETAILS=false
 ```
 
-| Key                    | Required | Description                                    |
-| ---------------------- | -------- | ---------------------------------------------- |
-| `USERNAME`             | yes      | Login username                                 |
-| `PASSWORD`             | yes      | Login password                                 |
-| `LOGIN_URL`            | yes      | POST endpoint that returns a JWT               |
-| `GET_CAPABILITIES_URL` | yes      | WMS GetCapabilities endpoint                   |
-| `BASE_URL`             | no       | Used to derive the output folder/filename slug |
+| Key                    | Required | Description                                                   |
+| ---------------------- | -------- | ------------------------------------------------------------- |
+| `USERNAME`             | yes      | Login username                                                |
+| `PASSWORD`             | yes      | Login password                                                |
+| `LOGIN_URL`            | yes      | POST endpoint that returns a JWT                              |
+| `GET_CAPABILITIES_URL` | yes      | WMS GetCapabilities endpoint                                  |
+| `BASE_URL`             | no       | Used to derive the output folder/filename slug                |
+| `SSL_VERIFY`           | no       | Set to `false` to skip SSL certificate verification           |
+| `FULL_LAYER_DETAILS`   | no       | Set to `false` to export layer names only (no other columns)  |
 
 The JWT token is auto-detected from the login response by probing common field names (`token`, `access_token`, `accessToken`, `jwt`, `id_token`, `idToken`). `envs/` is git-ignored — credentials are never committed.
+
+## Environment variables
+
+Both options can be set in the `.env` credential file (per-environment) or as OS environment variables (global fallback). The `.env` file takes precedence.
+
+### `SSL_VERIFY`
+
+Disables SSL certificate verification. Useful when the target server uses a self-signed or internally-issued certificate.
+
+```bash
+# In .env file (per-environment)
+SSL_VERIFY=false
+
+# Or as OS env var (applies to all environments)
+SSL_VERIFY=false python -m harvester
+```
+
+### `FULL_LAYER_DETAILS`
+
+Controls how many columns are written to the Excel output.
+
+| Value              | Columns exported                          |
+| ------------------ | ----------------------------------------- |
+| `true` (default)   | All columns (name, title, bbox, CRS, …)   |
+| `false`            | Layer name only                           |
+
+```bash
+# In .env file (per-environment)
+FULL_LAYER_DETAILS=false
+
+# Or as OS env var
+FULL_LAYER_DETAILS=false python -m harvester
+```
+
+Applies to all modes including `--mode pdf`.
 
 ## Flow
 
@@ -139,6 +181,13 @@ python -m harvester [--mode pdf] [--env FILE …] [--no-fetch]
             (same logic, adds PDF V2 column + breakdown to output)
 ```
 
+The data source is printed before processing starts:
+```
+Source: live fetch from 2 credential file(s) in envs/
+Source: cached JSON files in input/  (--no-fetch)
+Source: cached JSON files in input/
+```
+
 ## Fetch modes
 
 ### Auto-scan (default)
@@ -171,18 +220,26 @@ Use whatever JSON files are already in `input/` without making any network reque
 
 ## Output naming
 
-Output workbooks are named using the hostname from `BASE_URL` (or `LOGIN_URL` as fallback):
+Output filenames encode the source, detail level, and mode:
 
 ```
 output/
   dev.example.com/
-    20240101_120000_dev.example.com_layers.xlsx
-    20240101_120000_dev.example.com_pdf_layers.xlsx   ← --mode pdf
-  prod.example.com/
-    20240101_120000_prod.example.com_layers.xlsx
+    20240101_120000_dev.example.com_live_layers.xlsx
+    20240101_120000_dev.example.com_live_pdf_layers.xlsx      ← --mode pdf
+    20240101_120000_dev.example.com_live_names_layers.xlsx    ← FULL_LAYER_DETAILS=false
+    20240101_120000_dev.example.com_cached_layers.xlsx        ← --no-fetch
+    20240101_120000_dev.example.com_cached_names_layers.xlsx  ← --no-fetch + names only
 ```
 
-When no env files are present (manual input mode), the group directory name is used instead.
+| Segment   | Meaning                                  |
+| --------- | ---------------------------------------- |
+| `live`    | Data fetched live from an env credential |
+| `cached`  | Data read from existing `input/` JSON    |
+| `names`   | `FULL_LAYER_DETAILS=false` — name only   |
+| `pdf`     | `--mode pdf` — includes PDF V2 column    |
+
+When no env files are present (manual input mode), the group directory name is used as the slug.
 
 ## Manual input (no fetch)
 
@@ -190,9 +247,9 @@ Drop WMS JSON files directly into `input/` and run with `--no-fetch`:
 
 ```
 input/
-  dev.json                       → output/base/<timestamp>_base_layers.xlsx
+  dev.json                       → output/base/<timestamp>_base_cached_layers.xlsx
   quarticle/
-    dev.json                     → output/quarticle/<timestamp>_quarticle_layers.xlsx
+    dev.json                     → output/quarticle/<timestamp>_quarticle_cached_layers.xlsx
 ```
 
 ## Output columns
@@ -210,20 +267,44 @@ input/
 | Style Name(s)                     | Associated WMS styles                                                            |
 | Keywords                          | Full keyword list                                                                |
 
+When `FULL_LAYER_DETAILS=false`, only the **Layer Name** column is written.
+
 ## Distributable binary
 
-A self-contained executable can be built with PyInstaller:
+PyInstaller produces a self-contained binary. **Binaries are platform-specific** — a binary built on macOS will not run on Linux and vice versa.
+
+### Build for the current platform
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --name layer_harvester --collect-all rich harvester/__main__.py
+pyinstaller layer_harvester.spec
+./dist/layer_harvester
 ```
 
-The binary is written to `dist/layer_harvester` and supports all flags — [↑ back to table of contents](#table-of-contents).
+### Build for Linux from macOS (via Docker)
+
+```bash
+docker run --rm \
+  -v "$(pwd)":/src \
+  -w /src \
+  python:3.11-slim \
+  bash -c "pip install pyinstaller rich openpyxl && pyinstaller layer_harvester.spec"
+```
+
+Then copy `dist/layer_harvester` to the Linux server — no Python or source code needed.
+
+```bash
+scp dist/layer_harvester user@server:~/layer-harvester/layer_harvester
+```
+
+> Check the server architecture first (`uname -m`). Add `--platform linux/arm64` to the Docker command for `aarch64` servers.
+
+### Running the binary
 
 ```bash
 ./dist/layer_harvester --env /path/to/.quarticle.dev.env --mode pdf
 ./dist/layer_harvester --no-fetch
+SSL_VERIFY=false FULL_LAYER_DETAILS=false ./dist/layer_harvester
 ```
 
-Run from any directory — it reads `envs/`, `input/`, and writes `output/` relative to the binary's own location (the `dist/` folder).
+The binary reads `envs/`, `input/`, and writes `output/` relative to its own location — [↑ back to table of contents](#table-of-contents).
