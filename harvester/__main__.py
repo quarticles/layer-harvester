@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime
@@ -77,7 +78,10 @@ def build_summary_table(summary_rows: list, all_pdf_types: list, usage_pdf: bool
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extract hazardlookup layers from WMS capabilities JSON files.",
+        description=(
+            "Log in to WMS environments, fetch GetCapabilities, extract layers "
+            "tagged with hazardlookup keywords, and export results to Excel."
+        ),
     )
     parser.add_argument(
         "--mode",
@@ -112,8 +116,6 @@ def main():
     if usage_pdf:
         import harvester.pdf as pdf
 
-    columns = pdf.active_columns() if usage_pdf else BASE_COLUMNS
-
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     _prog_cols = (
@@ -139,8 +141,32 @@ def main():
             if slug:
                 group_slugs[grp] = slug
 
+    # FULL_LAYER_DETAILS: read from first env file, fall back to OS env.
+    _first_env = all_env_entries[0][2] if all_env_entries else {}
+    _full_details = _first_env.get("FULL_LAYER_DETAILS", os.environ.get("FULL_LAYER_DETAILS", "true"))
+    columns = pdf.active_columns() if usage_pdf else BASE_COLUMNS
+    if _full_details.strip().lower() in ("false", "0", "no"):
+        columns = [BASE_COLUMNS[0]]  # name only
+
     use_envs = bool(all_env_entries) and not args.no_fetch
     fetch_results: list[tuple[str, str, Path | None, str | None]] = []
+
+    # ── Data source banner ────────────────────────────────────────────────────
+    if use_envs:
+        console.print(
+            f"[bold]Source:[/bold] live fetch from "
+            f"[bold cyan]{len(all_env_entries)}[/bold cyan] credential file(s) in [dim]envs/[/dim]"
+        )
+    elif args.no_fetch and all_env_entries:
+        console.print(
+            "[bold]Source:[/bold] cached JSON files in [dim]input/[/dim]  "
+            "[dim](--no-fetch)[/dim]"
+        )
+    else:
+        console.print(
+            "[bold]Source:[/bold] cached JSON files in [dim]input/[/dim]"
+        )
+    console.print()
 
     # ── Fetch phase ───────────────────────────────────────────────────────────
     if use_envs:
@@ -210,7 +236,10 @@ def main():
         time.sleep(0.1)
 
         for group_name, json_files in groups.items():
-            label = f"[bold dim]input/{group_name}/[/bold dim]" if group_name else "[bold dim]input/[/bold dim]"
+            if use_envs:
+                label = f"[bold cyan]{group_name}[/bold cyan] [dim green](live)[/dim green]" if group_name else "[dim green](live)[/dim green]"
+            else:
+                label = f"[bold dim]input/{group_name}/[/bold dim]" if group_name else "[bold dim]input/[/bold dim]"
             files_prog.add_task(label, total=1, completed=1)
             time.sleep(0.1)
 
@@ -265,11 +294,13 @@ def main():
 
             # Determine output path for this group.
             # Use the BASE_URL hostname slug when available; fall back to group name.
-            name_slug = group_slugs.get(group_name, group_name or "base")
-            mode_suffix = "_pdf" if usage_pdf else ""
+            name_slug    = group_slugs.get(group_name, group_name or "base")
+            source_tag   = "live" if use_envs else "cached"
+            details_tag  = "_names" if len(columns) == 1 else ""
+            mode_suffix  = "_pdf" if usage_pdf else ""
             out_dir = OUTPUT_DIR / name_slug if name_slug else OUTPUT_DIR
             out_dir.mkdir(parents=True, exist_ok=True)
-            out_file = out_dir / f"{timestamp}_{name_slug}{mode_suffix}_layers.xlsx"
+            out_file = out_dir / f"{timestamp}_{name_slug}_{source_tag}{details_tag}{mode_suffix}_layers.xlsx"
 
             if usage_pdf:
                 all_pdf_types.sort(key=pdf.sort_key)

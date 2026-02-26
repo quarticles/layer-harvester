@@ -11,6 +11,8 @@ No UI dependencies — all errors are returned as strings for callers to display
 from __future__ import annotations
 
 import json
+import os
+import ssl
 import sys
 import urllib.error
 import urllib.parse
@@ -121,6 +123,23 @@ def env_entry_from_path(env_file: Path) -> tuple[str, str, dict]:
 
 # ── Fetch logic ───────────────────────────────────────────────────────────────
 
+def _ssl_context(env_dict: dict) -> ssl.SSLContext | None:
+    """
+    Return an unverified SSL context when SSL_VERIFY is falsy, otherwise None.
+
+    The value is read from env_dict first (i.e. the .env credential file),
+    falling back to the OS environment variable of the same name.
+    Set SSL_VERIFY=false to disable certificate verification.
+    """
+    raw = env_dict.get("SSL_VERIFY", os.environ.get("SSL_VERIFY", "true"))
+    if raw.strip().lower() in ("false", "0", "no"):
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    return None
+
+
 # Candidate field names to probe in the login response, in priority order.
 _TOKEN_CANDIDATES = ("token", "access_token", "accessToken", "jwt", "id_token", "idToken")
 
@@ -166,6 +185,8 @@ def fetch_capabilities(
     if not caps_url:
         return None, "GET_CAPABILITIES_URL is missing from .env file"
 
+    ssl_ctx = _ssl_context(env_dict)
+
     # ── Step 1: Login ─────────────────────────────────────────────────────────
     payload = json.dumps({"username": username, "password": password}).encode("utf-8")
     login_req = urllib.request.Request(
@@ -175,7 +196,7 @@ def fetch_capabilities(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(login_req, timeout=30) as resp:
+        with urllib.request.urlopen(login_req, timeout=30, context=ssl_ctx) as resp:
             login_body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         return None, f"Login failed HTTP {exc.code}: {exc.reason}"
@@ -201,7 +222,7 @@ def fetch_capabilities(
         method="GET",
     )
     try:
-        with urllib.request.urlopen(caps_req, timeout=60) as resp:
+        with urllib.request.urlopen(caps_req, timeout=60, context=ssl_ctx) as resp:
             caps_data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         return None, f"GetCapabilities failed HTTP {exc.code}: {exc.reason}"
