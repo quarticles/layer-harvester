@@ -20,7 +20,7 @@ from pathlib import Path
 # Mirrors the path-resolution logic in core.py so the module works both when
 # run from source and when bundled with PyInstaller.
 if getattr(sys, "frozen", False):
-    _ROOT = Path.cwd()
+    _ROOT = Path(sys.executable).parent
 else:
     _ROOT = Path(__file__).parent.parent
 

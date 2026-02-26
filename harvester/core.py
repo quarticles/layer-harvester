@@ -12,12 +12,11 @@ import openpyxl  # noqa: F401  (imported for callers that do wb = openpyxl.Workb
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-# When bundled with PyInstaller sys.frozen is set; __file__ resolves inside the
-# temp extraction dir, so use the working directory instead. That matches the
-# unfrozen behaviour (run from project root) and lets users place input/ next to
-# wherever they invoke the binary from.
+# When bundled with PyInstaller sys.frozen is set; use the directory containing
+# the binary so envs/, input/, and output/ are always resolved relative to it,
+# regardless of the working directory the binary is invoked from.
 if getattr(sys, "frozen", False):
-    _ROOT = Path.cwd()
+    _ROOT = Path(sys.executable).parent
 else:
     _ROOT = Path(__file__).parent.parent
 

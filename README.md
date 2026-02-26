@@ -226,4 +226,4 @@ The binary is written to `dist/layer_harvester` and supports all flags — [↑ 
 ./dist/layer_harvester --no-fetch
 ```
 
-Run from any directory — it reads `envs/`, `input/`, and writes `output/` relative to the working directory.
+Run from any directory — it reads `envs/`, `input/`, and writes `output/` relative to the binary's own location (the `dist/` folder).
