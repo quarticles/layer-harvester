@@ -9,8 +9,11 @@ Usage:
     python -m harvester --usage pdf     # includes PDF V2 column and breakdown
 """
 
+from __future__ import annotations
+
 import argparse
 import json
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -24,19 +27,24 @@ from rich.table import Table
 from rich.panel import Panel
 from rich import box
 
+import harvester.fetcher as fetcher
 from harvester.core import (
-    INPUT_DIR, OUTPUT_DIR, BASE_COLUMNS, NO_PDF_LABEL,
+    INPUT_DIR, OUTPUT_DIR, ENVS_DIR, BASE_COLUMNS, NO_PDF_LABEL,
     find_hazard_layers, extract_row,
     write_sheet, write_legend_sheet, collect_groups,
 )
 
 console = Console()
 
-# Project root — one level above this package
-_ROOT = Path(__file__).parent.parent
+# Project root — mirrors the logic in core.py so relative display paths work
+# identically whether running from source or as a PyInstaller bundle.
+if getattr(sys, "frozen", False):
+    _ROOT = Path.cwd()
+else:
+    _ROOT = Path(__file__).parent.parent
 
 
-# ── Summary table (UI concern — lives here, not in core/pdf_mode) ─────────────
+# ── Summary table (UI concern — lives here, not in core/pdf) ─────────────────
 
 def build_summary_table(summary_rows: list, all_pdf_types: list, usage_pdf: bool) -> Table:
     table = Table(
@@ -72,28 +80,108 @@ def main():
         description="Extract hazardlookup layers from WMS capabilities JSON files.",
     )
     parser.add_argument(
-        "--usage",
+        "--mode",
         choices=["pdf"],
         default=None,
         help="Output mode. Pass 'pdf' to include PDF V2 columns in the Excel and summary.",
     )
+    parser.add_argument(
+        "--no-fetch",
+        action="store_true",
+        dest="no_fetch",
+        help="Skip fetching from envs/ even if credential files are present.",
+    )
+    parser.add_argument(
+        "--env",
+        action="append",
+        dest="env_files",
+        metavar="PATH",
+        help=(
+            "Path to a specific .local.env file to fetch. "
+            "Can be repeated for multiple environments. "
+            "Takes precedence over auto-scanning envs/."
+        ),
+    )
     args = parser.parse_args()
-    usage_pdf  = args.usage == "pdf"
-    usage_slug = args.usage if args.usage else "base"
+    usage_pdf  = args.mode == "pdf"
+    usage_slug = args.mode if args.mode else "base"
     timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Load PDF module only when needed
     pdf = None
     if usage_pdf:
-        import harvester.pdf_mode as pdf
+        import harvester.pdf as pdf
 
     columns = pdf.active_columns() if usage_pdf else BASE_COLUMNS
 
     OUTPUT_DIR.mkdir(exist_ok=True)
 
-    groups = collect_groups(INPUT_DIR)
+    _prog_cols = (
+        SpinnerColumn(),
+        BarColumn(bar_width=30),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        TextColumn("[bold blue]{task.description}"),
+    )
+
+    # ── Source detection ──────────────────────────────────────────────────────
+    if args.env_files:
+        all_env_entries = [fetcher.env_entry_from_path(Path(p)) for p in args.env_files]
+    else:
+        all_env_entries = fetcher.scan_envs(ENVS_DIR)
+
+    # Build group → hostname slug map from BASE_URL (or LOGIN_URL as fallback).
+    group_slugs: dict[str, str] = {}
+    for grp, _env_name, env_dict in all_env_entries:
+        if grp not in group_slugs:
+            raw = env_dict.get("BASE_URL") or env_dict.get("LOGIN_URL", "")
+            slug = fetcher.url_slug(raw)
+            if slug:
+                group_slugs[grp] = slug
+
+    use_envs = bool(all_env_entries) and not args.no_fetch
+    fetch_results: list[tuple[str, str, Path | None, str | None]] = []
+
+    # ── Fetch phase ───────────────────────────────────────────────────────────
+    if use_envs:
+        n = len(all_env_entries)
+        console.print(f"[bold cyan]Found {n} env file(s) → fetching capabilities…[/bold cyan]")
+        time.sleep(0.1)
+        fetch_prog = Progress(*_prog_cols, console=console)
+        with Live(fetch_prog, console=console, refresh_per_second=15):
+            task = fetch_prog.add_task("Fetching", total=n)
+            for group, env_name, env_dict in all_env_entries:
+                fetch_prog.update(
+                    task,
+                    description=f"[bold blue]{group}/{env_name}[/bold blue]",
+                )
+                saved, err = fetcher.fetch_capabilities(group, env_name, env_dict, INPUT_DIR)
+                fetch_results.append((group, env_name, saved, err))
+                fetch_prog.advance(task)
+        for group, env_name, saved, err in fetch_results:
+            if err:
+                console.print(f"  [bold red]✗[/bold red] {group}/{env_name}  [dim red]{err}[/dim red]")
+            else:
+                console.print(f"  [bold green]✓[/bold green] {group}/{env_name}")
+        console.print()
+    elif not all_env_entries and not args.no_fetch:
+        console.print("[yellow]No env files found in envs/ — falling back to input/ JSON files…[/yellow]")
+        console.print()
+
+    # ── Resolve groups to harvest ─────────────────────────────────────────────
+    if args.env_files and fetch_results:
+        groups: dict[str, list[Path]] = {}
+        for _g, _e, saved, _err in fetch_results:
+            if saved:
+                groups.setdefault(_g, []).append(saved)
+    else:
+        groups = collect_groups(INPUT_DIR)
+
     if not groups:
-        console.print("[bold red]No JSON files found in input/[/bold red]")
+        if not all_env_entries and not args.no_fetch:
+            console.print("[bold red]Nothing to do: no env files in envs/ and no JSON files in input/.[/bold red]")
+        else:
+            console.print("[bold red]No JSON files found in input/[/bold red]")
         return
 
     total_files = sum(len(v) for v in groups.values())
@@ -110,13 +198,6 @@ def main():
     saved_files   = []
     group_results = []
 
-    _prog_cols = (
-        SpinnerColumn(),
-        BarColumn(bar_width=30),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TimeElapsedColumn(),
-        TextColumn("[bold blue]{task.description}"),
-    )
     overall_prog = Progress(*_prog_cols, console=console)
     files_prog   = Progress(*_prog_cols, console=console)
 
@@ -182,10 +263,13 @@ def main():
                     "pdf_counts": pdf_counts,
                 })
 
-            # Determine output path for this group
-            out_dir = OUTPUT_DIR / group_name if group_name else OUTPUT_DIR
+            # Determine output path for this group.
+            # Use the BASE_URL hostname slug when available; fall back to group name.
+            name_slug = group_slugs.get(group_name, group_name or "base")
+            mode_suffix = "_pdf" if usage_pdf else ""
+            out_dir = OUTPUT_DIR / name_slug if name_slug else OUTPUT_DIR
             out_dir.mkdir(parents=True, exist_ok=True)
-            out_file = out_dir / f"{timestamp}_{usage_slug}_layers.xlsx"
+            out_file = out_dir / f"{timestamp}_{name_slug}{mode_suffix}_layers.xlsx"
 
             if usage_pdf:
                 all_pdf_types.sort(key=pdf.sort_key)

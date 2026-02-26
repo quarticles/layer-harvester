@@ -3,12 +3,19 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Input data
-input/
+# Input data — ignore JSON cache files, keep folder structure
+input/**/*.json
+
+# Environment credential files — never commit sensitive files, keep folder structure
+envs/.*.*env
 
 # Output — keep folder, ignore contents
 output/*
 !output/.gitkeep
+
+# PyInstaller build artifacts
+build/
+dist/
 
 # macOS
 .DS_Store

@@ -5,17 +5,25 @@ Handles JSON parsing, layer extraction, bbox detection, and Excel output.
 No UI dependencies — import freely from any context.
 """
 
+import sys
 from pathlib import Path
 
 import openpyxl  # noqa: F401  (imported for callers that do wb = openpyxl.Workbook())
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-# Project root is one level above this package
-_ROOT = Path(__file__).parent.parent
+# When bundled with PyInstaller sys.frozen is set; __file__ resolves inside the
+# temp extraction dir, so use the working directory instead. That matches the
+# unfrozen behaviour (run from project root) and lets users place input/ next to
+# wherever they invoke the binary from.
+if getattr(sys, "frozen", False):
+    _ROOT = Path.cwd()
+else:
+    _ROOT = Path(__file__).parent.parent
 
 INPUT_DIR  = _ROOT / "input"
 OUTPUT_DIR = _ROOT / "output"
+ENVS_DIR   = _ROOT / "envs"
 
 # ── Column definitions ────────────────────────────────────────────────────────
 
@@ -194,7 +202,7 @@ def write_legend_sheet(wb, extra_col_desc=None):
     Write the Legend sheet.
 
     extra_col_desc: optional (name, description) tuple inserted after the
-                    'Is Global' entry (used by pdf_mode to inject the PDF V2 row).
+                    'Is Global' entry (used by pdf to inject the PDF V2 row).
     """
     ws = wb.create_sheet(title="Legend")
 
